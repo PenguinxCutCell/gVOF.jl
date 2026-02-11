@@ -1,0 +1,19 @@
+name = "gVOF"
+uuid = "04ededa1-a232-4018-ac62-0847248ccfed"
+authors = ["Fastaxx <l.libat2001@gmail.com>"]
+version = "0.1.0"
+
+[deps]
+ISOAP = "75e88e8e-8488-4b14-bf8c-a5e98e21fac3"
+LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
+Printf = "de0858da-6303-5e67-8744-51eddeeeb8d7"
+VOFTools = "f4b4545c-59ad-49ee-afe8-a74df8bf51d2"
+
+[compat]
+julia = "1.10"
+
+[extras]
+Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
+
+[targets]
+test = ["Test"]
