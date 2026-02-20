@@ -1,8 +1,13 @@
 # gVOF.jl
 
+[![In development documentation](https://img.shields.io/badge/docs-dev-blue.svg)](https://penguinxcutcell.github.io/gVOF.jl/dev)
 ![CI](https://github.com/PenguinxCutCell/gVOF.jl/workflows/CI/badge.svg)
 
 A Julia implementation of the geometrical Volume-of-Fluid (gVOF) method for interface tracking and reconstruction.
+
+Documentation is built with Documenter.jl and published to:
+- Stable: `https://penguinxcutcell.github.io/gVOF.jl/stable`
+- Dev: `https://penguinxcutcell.github.io/gVOF.jl/dev`
 
 **Original Work:** This package is a Julia translation of the Fortran gVOF library by J. Lopez and J. Hernandez (2021). All credits for the original research, algorithms, and Fortran implementation go to the original authors and contributors.
 
@@ -37,4 +42,3 @@ initfgrid!(vg, func3dinic(1))
 taggrid!(vg)
 reconstruct!(vg, params)
 ```
-

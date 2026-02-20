@@ -2,3 +2,5 @@ Manifest.toml
 *.vtk
 gvof
 *.logout
+docs/build/
+docs/Manifest.toml
