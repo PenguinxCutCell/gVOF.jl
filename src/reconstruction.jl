@@ -81,10 +81,12 @@ function lsrec(f::AbstractVector{Float64},
                vertcz::AbstractVector{Float64},
                pn::Float64)
     n = length(f) - 1
-    # Build weighted AᵀA and Aᵀb
-    ata = zeros(3, 3)
-    atb = zeros(3)
     xr, yr, zr, fr = vertcx[n+1], vertcy[n+1], vertcz[n+1], f[n+1]
+    ata11 = ata12 = ata13 = 0.0
+    ata22 = ata23 = 0.0
+    ata33 = 0.0
+    atb1 = atb2 = atb3 = 0.0
+
     for i in 1:n
         d = sqrt((vertcx[i]-xr)^2 + (vertcy[i]-yr)^2 + (vertcz[i]-zr)^2)
         w = 1.0 / d^pn
@@ -92,21 +94,36 @@ function lsrec(f::AbstractVector{Float64},
         a2 = w * (vertcy[i] - yr)
         a3 = w * (vertcz[i] - zr)
         b  = w * (f[i] - fr)
-        a  = (a1, a2, a3)
-        for j in 1:3, k in 1:3
-            ata[j,k] += a[j] * a[k]
-        end
-        for j in 1:3
-            atb[j] += a[j] * b
-        end
+
+        ata11 += a1 * a1
+        ata12 += a1 * a2
+        ata13 += a1 * a3
+        ata22 += a2 * a2
+        ata23 += a2 * a3
+        ata33 += a3 * a3
+
+        atb1 += a1 * b
+        atb2 += a2 * b
+        atb3 += a3 * b
     end
 
-    # Solve 3×3 system (Cramer / back-substitution with pivoting guard)
-    xn = yn = zn = 0.0
-    try
-        sol = ata \ atb
-        xn, yn, zn = sol[1], sol[2], sol[3]
-    catch
+    det = ata11*(ata22*ata33 - ata23*ata23) -
+          ata12*(ata12*ata33 - ata13*ata23) +
+          ata13*(ata12*ata23 - ata13*ata22)
+    abs(det) ≤ 1e-30 && return (1.0, 0.0, 0.0)
+
+    inv11 =  (ata22*ata33 - ata23*ata23) / det
+    inv12 = -(ata12*ata33 - ata13*ata23) / det
+    inv13 =  (ata12*ata23 - ata13*ata22) / det
+    inv22 =  (ata11*ata33 - ata13*ata13) / det
+    inv23 = -(ata11*ata23 - ata12*ata13) / det
+    inv33 =  (ata11*ata22 - ata12*ata12) / det
+
+    xn = inv11*atb1 + inv12*atb2 + inv13*atb3
+    yn = inv12*atb1 + inv22*atb2 + inv23*atb3
+    zn = inv13*atb1 + inv23*atb2 + inv33*atb3
+
+    if !(isfinite(xn) && isfinite(yn) && isfinite(zn))
         return (1.0, 0.0, 0.0)
     end
 
@@ -221,6 +238,141 @@ function _plic_centroid(poly::Polyhedron3D, nts_before::Int)
     return nothing
 end
 
+mutable struct _ReconWork
+    poly::Polyhedron3D
+    poly1::Polyhedron3D
+    poly2::Polyhedron3D
+    ipg::Vector{Int}
+    fv::Vector{Float64}
+    vx::Vector{Float64}
+    vy::Vector{Float64}
+    vz::Vector{Float64}
+    vcx::Vector{Float64}
+    vcy::Vector{Float64}
+    vcz::Vector{Float64}
+    nnx::Vector{Float64}
+    nny::Vector{Float64}
+    nnz::Vector{Float64}
+    vertc::Vector{NTuple{3,Float64}}
+    phi_v::Vector{Float64}
+    iplc::Vector{Int}
+    nlc_v::Vector{Int}
+    ineigblc::Vector{Vector{Int}}
+    xlc::Vector{Vector{Float64}}
+    ylc::Vector{Vector{Float64}}
+    zlc::Vector{Vector{Float64}}
+    cplic::Matrix{Float64}
+    cplic2::Matrix{Float64}
+    mark::Vector{Int}
+    mark2::Vector{Int}
+    xnorm2::Vector{Float64}
+    ynorm2::Vector{Float64}
+    znorm2::Vector{Float64}
+    rholi2::Vector{Float64}
+    alpha::Vector{Float64}
+    iso_cells::Vector{Polyhedron}
+    iso_ws::IsoapWorkspace
+end
+
+function _ReconWork(vg::VOFGrid)
+    ns_max = VOFTools.NS_DEFAULT
+    nv_max = VOFTools.NV_DEFAULT
+    max_neigs = maximum(length, vg.ineigb)
+    max_nip = maximum(length, vg.grid.ipcell)
+    ncell = vg.grid.ncell
+    max_nts = maximum(length, vg.grid.iscell)
+    max_facev = maximum(length, vg.grid.ipface)
+    poly_builder() = Polyhedron3D(
+        zeros(nv_max, 3),
+        zeros(Int, ns_max, nv_max),
+        zeros(Int, ns_max),
+        zeros(ns_max),
+        zeros(ns_max),
+        zeros(ns_max),
+        0, 0, 0,
+    )
+    iso_cells = [cellgrid(vg.grid, ic) for ic in 1:ncell]
+    dummy_ipv = [collect(1:max_facev) for _ in 1:max_nts]
+    dummy_vertp = fill((0.0, 0.0, 0.0), max_nip)
+    iso_ws = IsoapWorkspace(Polyhedron(dummy_ipv, dummy_vertp))
+    return _ReconWork(
+        poly_builder(),
+        poly_builder(),
+        poly_builder(),
+        zeros(Int, max_nip),
+        zeros(max_neigs + 1),
+        zeros(max_neigs + 1),
+        zeros(max_neigs + 1),
+        zeros(max_neigs + 1),
+        zeros(max_neigs + 1),
+        zeros(max_neigs + 1),
+        zeros(max_neigs + 1),
+        zeros(max_neigs + 1),
+        zeros(max_neigs + 1),
+        zeros(max_neigs + 1),
+        NTuple{3,Float64}[],
+        zeros(max_nip),
+        zeros(Int, ncell),
+        zeros(Int, ncell),
+        [Int[] for _ in 1:ncell],
+        [Float64[] for _ in 1:ncell],
+        [Float64[] for _ in 1:ncell],
+        [Float64[] for _ in 1:ncell],
+        zeros(ncell, 3),
+        zeros(ncell, 3),
+        zeros(Int, ncell),
+        zeros(Int, ncell),
+        zeros(ncell),
+        zeros(ncell),
+        zeros(ncell),
+        zeros(ncell),
+        zeros(ncell),
+        iso_cells,
+        iso_ws,
+    )
+end
+
+@inline function _ensure_lc_storage!(arr::Vector{Float64}, n::Int)
+    resize!(arr, n)
+    return arr
+end
+
+@inline function _ensure_lc_storage!(arr::Vector{Int}, n::Int)
+    resize!(arr, n)
+    return arr
+end
+
+@inline function _load_vertc!(vertc::Vector{NTuple{3,Float64}},
+                              xarr::Vector{Float64},
+                              yarr::Vector{Float64},
+                              zarr::Vector{Float64},
+                              n::Int)
+    resize!(vertc, n)
+    @inbounds for i in 1:n
+        vertc[i] = (xarr[i], yarr[i], zarr[i])
+    end
+    return vertc
+end
+
+function _get_recon_work(vg::VOFGrid)
+    tls = task_local_storage()
+    cache_any = get(tls, :_gvof_recon_work, nothing)
+    cache = if cache_any === nothing
+        c = Dict{UInt, _ReconWork}()
+        tls[:_gvof_recon_work] = c
+        c
+    else
+        cache_any::Dict{UInt, _ReconWork}
+    end
+    key = objectid(vg)
+    work = get(cache, key, nothing)
+    if work === nothing
+        work = _ReconWork(vg)
+        cache[key] = work
+    end
+    return work::_ReconWork
+end
+
 # ═══════════════════════════════════════════════════════════════════════════
 #  1.  LLCIR – Local Level-Contour Interface Reconstruction (irec=3)
 # ═══════════════════════════════════════════════════════════════════════════
@@ -230,16 +382,18 @@ end
 PLIC reconstruction using the local level-contour iso-surface (LLCIR).
 """
 function llcir!(vg::VOFGrid; iw::Int=1, pn::Float64=1.5, igrid::Int=1)
-    g      = vg.grid
-    ncell  = g.ncell
-    icint  = vg.icint
-
-    # Per-cell LC data
-    iplc  = zeros(Int, ncell)
-    nlc_v = zeros(Int, ncell)
-    xlc   = Vector{Vector{Float64}}(undef, ncell)
-    ylc   = Vector{Vector{Float64}}(undef, ncell)
-    zlc   = Vector{Vector{Float64}}(undef, ncell)
+    g     = vg.grid
+    icint = vg.icint
+    work  = _get_recon_work(vg)
+    iplc  = work.iplc
+    nlc_v = work.nlc_v
+    xlc   = work.xlc
+    ylc   = work.ylc
+    zlc   = work.zlc
+    iso_ws = work.iso_ws
+    iso_cells = work.iso_cells
+    fill!(iplc, 0)
+    fill!(nlc_v, 0)
 
     # Local iso-surface construction
     phivlc = 0.5
@@ -247,46 +401,52 @@ function llcir!(vg::VOFGrid; iw::Int=1, pn::Float64=1.5, igrid::Int=1)
         ic = icint[ind]
         fnmax = 0.0; fnmin = 1.0
         nodes = g.ipcell[ic]
-        phi_v = Float64[vg.frnod[ip] for ip in nodes]
+        nnodes = length(nodes)
+        phi_v = @view(work.phi_v[1:nnodes])
+        @inbounds for i in 1:nnodes
+            phi_v[i] = vg.frnod[nodes[i]]
+        end
         for p in phi_v
             fnmax = max(fnmax, p); fnmin = min(fnmin, p)
         end
         fnmax ≤ 0.5 && continue
         fnmin ≥ 0.5 && continue
 
-        poly_isoap = cellgrid(g, ic)
-        res = isoap(poly_isoap, phi_v, phivlc)
-        niso(res) == 1 || continue
+        isoap!(iso_ws, iso_cells[ic], phi_v, phivlc)
+        iso_ws.npoly == 1 || continue
 
         iplc[ic] = ic
-        ipv_iso = res.ipviso[1]
-        n_lc = length(ipv_iso)
+        n_lc = iso_ws.poly_lens[1]
         nlc_v[ic] = n_lc
-        xarr = zeros(n_lc + 1); yarr = zeros(n_lc + 1); zarr = zeros(n_lc + 1)
+        xarr = _ensure_lc_storage!(xlc[ic], n_lc + 1)
+        yarr = _ensure_lc_storage!(ylc[ic], n_lc + 1)
+        zarr = _ensure_lc_storage!(zlc[ic], n_lc + 1)
         xsum = ysum = zsum = 0.0
         for i in 1:n_lc
-            ip  = ipv_iso[i]
-            v   = res.vertiso[ip]
+            ip = iso_ws.polys[1, i]
+            v = iso_ws.vertiso[ip]
             xarr[i] = v[1]; yarr[i] = v[2]; zarr[i] = v[3]
             xsum += v[1]; ysum += v[2]; zsum += v[3]
         end
         xarr[end] = xsum / n_lc; yarr[end] = ysum / n_lc; zarr[end] = zsum / n_lc
-        xlc[ic] = xarr; ylc[ic] = yarr; zlc[ic] = zarr
     end
 
     # Volume enforcement
     for ind in eachindex(icint)
         ic = icint[ind]
-        poly = defcell(vg, ic)
+        poly = defcell!(work.poly, work.ipg, vg, ic)
 
         if iplc[ic] != 0
             n_lc = nlc_v[ic]
-            vertc = NTuple{3,Float64}[(xlc[ic][i], ylc[ic][i], zlc[ic][i]) for i in 1:n_lc+1]
+            vertc = _load_vertc!(work.vertc, xlc[ic], ylc[ic], zlc[ic], n_lc + 1)
             xn, yn, zn = isrec(iw, vertc)
         else
             neigs = vg.ineigb[ic]
             nn    = length(neigs)
-            fv    = zeros(nn+1); vx = zeros(nn+1); vy = zeros(nn+1); vz = zeros(nn+1)
+            fv = work.fv
+            vx = work.vx
+            vy = work.vy
+            vz = work.vz
             for ii in 1:nn
                 ic2 = neigs[ii]
                 fv[ii] = vg.fractg[ic2]
@@ -294,7 +454,8 @@ function llcir!(vg::VOFGrid; iw::Int=1, pn::Float64=1.5, igrid::Int=1)
             end
             fv[nn+1] = vg.fractg[ic]
             vx[nn+1] = vg.ccell[ic,1]; vy[nn+1] = vg.ccell[ic,2]; vz[nn+1] = vg.ccell[ic,3]
-            xn, yn, zn = lsrec(fv, vx, vy, vz, pn)
+            xn, yn, zn = lsrec(@view(fv[1:nn+1]), @view(vx[1:nn+1]),
+                               @view(vy[1:nn+1]), @view(vz[1:nn+1]), pn)
         end
         vg.xnormg[ic] = xn; vg.ynormg[ic] = yn; vg.znormg[ic] = zn
         c = _enforce_volume(vg, ic, poly, xn, yn, zn; igrid)
@@ -315,52 +476,58 @@ function elcir!(vg::VOFGrid; iw::Int=1, pn::Float64=1.5, igrid::Int=1)
     g      = vg.grid
     ncell  = g.ncell
     icint  = vg.icint
-
-    iplc      = zeros(Int, ncell)
-    nlc_v     = zeros(Int, ncell)
-    ineigblc  = Vector{Vector{Int}}(undef, ncell)
-    xlc = Vector{Vector{Float64}}(undef, ncell)
-    ylc = Vector{Vector{Float64}}(undef, ncell)
-    zlc = Vector{Vector{Float64}}(undef, ncell)
+    work   = _get_recon_work(vg)
+    iplc      = work.iplc
+    nlc_v     = work.nlc_v
+    ineigblc  = work.ineigblc
+    xlc       = work.xlc
+    ylc       = work.ylc
+    zlc       = work.zlc
+    iso_ws    = work.iso_ws
+    iso_cells = work.iso_cells
+    fill!(iplc, 0)
+    fill!(nlc_v, 0)
 
     phivlc = 0.5
     # Local LC construction (over all cells)
     for ic in 1:ncell
-        iplc[ic] = 0
         fnmax = 0.0; fnmin = 1.0
         nodes = g.ipcell[ic]
-        phi_v = Float64[vg.frnod[ip] for ip in nodes]
+        nnodes = length(nodes)
+        phi_v = @view(work.phi_v[1:nnodes])
+        @inbounds for i in 1:nnodes
+            phi_v[i] = vg.frnod[nodes[i]]
+        end
         for p in phi_v; fnmax = max(fnmax, p); fnmin = min(fnmin, p); end
         (fnmax ≤ 0.5 || fnmin ≥ 0.5) && continue
 
-        poly_is = cellgrid(g, ic)
-        res = isoap(poly_is, phi_v, phivlc)
-        niso(res) == 1 || continue
+        isoap!(iso_ws, iso_cells[ic], phi_v, phivlc)
+        iso_ws.npoly == 1 || continue
 
         iplc[ic] = ic
-        ipv_iso = res.ipviso[1]
-        n_lc = length(ipv_iso)
+        n_lc = iso_ws.poly_lens[1]
         nlc_v[ic] = n_lc
-        neig_lc = Int[]
-        xarr = zeros(n_lc + 1); yarr = zeros(n_lc + 1); zarr = zeros(n_lc + 1)
+        neig_lc = _ensure_lc_storage!(ineigblc[ic], n_lc)
+        xarr = _ensure_lc_storage!(xlc[ic], n_lc + 1)
+        yarr = _ensure_lc_storage!(ylc[ic], n_lc + 1)
+        zarr = _ensure_lc_storage!(zlc[ic], n_lc + 1)
         xsum = ysum = zsum = 0.0
         for i in 1:n_lc
             i2 = (i == n_lc) ? 1 : i + 1
-            ip = ipv_iso[i]; ip2 = ipv_iso[i2]
-            is_face = res.isoeface[ip]
+            ip = iso_ws.polys[1, i]
+            ip2 = iso_ws.polys[1, i2]
+            is_face = iso_ws.isoeface[ip]
             iface = g.iscell[ic][is_face]
             icneig = g.icface[iface,1]
             icneig == ic && (icneig = g.icface[iface,2])
-            push!(neig_lc, icneig)
-            mx = 0.5*(res.vertiso[ip][1] + res.vertiso[ip2][1])
-            my = 0.5*(res.vertiso[ip][2] + res.vertiso[ip2][2])
-            mz = 0.5*(res.vertiso[ip][3] + res.vertiso[ip2][3])
+            neig_lc[i] = icneig
+            mx = 0.5*(iso_ws.vertiso[ip][1] + iso_ws.vertiso[ip2][1])
+            my = 0.5*(iso_ws.vertiso[ip][2] + iso_ws.vertiso[ip2][2])
+            mz = 0.5*(iso_ws.vertiso[ip][3] + iso_ws.vertiso[ip2][3])
             xarr[i] = mx; yarr[i] = my; zarr[i] = mz
             xsum += mx; ysum += my; zsum += mz
         end
         xarr[end] = xsum/n_lc; yarr[end] = ysum/n_lc; zarr[end] = zsum/n_lc
-        ineigblc[ic] = neig_lc
-        xlc[ic] = xarr; ylc[ic] = yarr; zlc[ic] = zarr
     end
 
     # Preliminary normal + extended LC update
@@ -368,7 +535,7 @@ function elcir!(vg::VOFGrid; iw::Int=1, pn::Float64=1.5, igrid::Int=1)
         ic = icint[ind]
         iplc[ic] == 0 && continue
         n_lc = nlc_v[ic]
-        vertc = NTuple{3,Float64}[(xlc[ic][i], ylc[ic][i], zlc[ic][i]) for i in 1:n_lc+1]
+        vertc = _load_vertc!(work.vertc, xlc[ic], ylc[ic], zlc[ic], n_lc + 1)
         xn, yn, zn = isrec(iw, vertc)
         vg.xnormg[ic] = xn; vg.ynormg[ic] = yn; vg.znormg[ic] = zn
         # Replace edge midpoints with neighbour LC centres
@@ -385,11 +552,11 @@ function elcir!(vg::VOFGrid; iw::Int=1, pn::Float64=1.5, igrid::Int=1)
     # Volume enforcement
     for ind in eachindex(icint)
         ic = icint[ind]
-        poly = defcell(vg, ic)
+        poly = defcell!(work.poly, work.ipg, vg, ic)
 
         if iplc[ic] != 0
             n_lc = nlc_v[ic]
-            vertc = NTuple{3,Float64}[(xlc[ic][i], ylc[ic][i], zlc[ic][i]) for i in 1:n_lc+1]
+            vertc = _load_vertc!(work.vertc, xlc[ic], ylc[ic], zlc[ic], n_lc + 1)
             xn, yn, zn = isrec(iw, vertc)
             α = acos(clamp(vg.xnormg[ic]*xn + vg.ynormg[ic]*yn + vg.znormg[ic]*zn, -1.0, 1.0))
             if α > 1.2
@@ -397,13 +564,17 @@ function elcir!(vg::VOFGrid; iw::Int=1, pn::Float64=1.5, igrid::Int=1)
             end
         else
             neigs = vg.ineigb[ic]; nn = length(neigs)
-            fv = zeros(nn+1); vx = zeros(nn+1); vy = zeros(nn+1); vz = zeros(nn+1)
+            fv = work.fv
+            vx = work.vx
+            vy = work.vy
+            vz = work.vz
             for ii in 1:nn
                 ic2 = neigs[ii]; fv[ii] = vg.fractg[ic2]
                 vx[ii] = vg.ccell[ic2,1]; vy[ii] = vg.ccell[ic2,2]; vz[ii] = vg.ccell[ic2,3]
             end
             fv[nn+1] = vg.fractg[ic]; vx[nn+1] = vg.ccell[ic,1]; vy[nn+1] = vg.ccell[ic,2]; vz[nn+1] = vg.ccell[ic,3]
-            xn, yn, zn = lsrec(fv, vx, vy, vz, pn)
+            xn, yn, zn = lsrec(@view(fv[1:nn+1]), @view(vx[1:nn+1]),
+                               @view(vy[1:nn+1]), @view(vz[1:nn+1]), pn)
         end
         vg.xnormg[ic] = xn; vg.ynormg[ic] = yn; vg.znormg[ic] = zn
         c = _enforce_volume(vg, ic, poly, xn, yn, zn; igrid)
@@ -426,22 +597,25 @@ function clcir!(vg::VOFGrid; iw::Int=1, pn::Float64=1.5, igrid::Int=1)
     elcir!(vg; iw, pn, igrid)
 
     g     = vg.grid
-    ncell = g.ncell
     icint = vg.icint
+    work  = _get_recon_work(vg)
 
     # Compute PLIC centroids from current reconstruction
-    cplic = zeros(ncell, 3)
-    mark  = zeros(Int, ncell)
+    cplic = work.cplic
+    mark  = work.mark
+    fill!(mark, 0)
     for ind in eachindex(icint)
         ic = icint[ind]
-        poly = defcell(vg, ic)
+        poly = defcell!(work.poly, work.ipg, vg, ic)
         xnc, ync, znc = vg.xnormg[ic], vg.ynormg[ic], vg.znormg[ic]
         c = vg.rholig[ic]
         nts_before = poly.nts
         icontn, icontp = inte3d!(poly, c, xnc, ync, znc)
         ctr = _plic_centroid(poly, nts_before)
         if ctr !== nothing
-            cplic[ic,:] .= ctr
+            cplic[ic,1] = ctr[1]
+            cplic[ic,2] = ctr[2]
+            cplic[ic,3] = ctr[3]
             mark[ic] = 1
         end
     end
@@ -452,11 +626,12 @@ function clcir!(vg::VOFGrid; iw::Int=1, pn::Float64=1.5, igrid::Int=1)
     for ind in eachindex(icint)
         ic = icint[ind]
         mark[ic] == 0 && continue
-        poly = defcell(vg, ic)
+        poly = defcell!(work.poly, work.ipg, vg, ic)
 
         # Gather neighbour PLIC centroids
         neigs = vg.ineigb[ic]
-        vertc = NTuple{3,Float64}[]
+        vertc = work.vertc
+        empty!(vertc)
         for icn in neigs
             mark[icn] == 0 && continue
             push!(vertc, (cplic[icn,1], cplic[icn,2], cplic[icn,3]))
@@ -486,18 +661,23 @@ PLIC reconstruction using a weighted least-squares gradient estimate.
 """
 function lsgir!(vg::VOFGrid; pn::Float64=1.5, igrid::Int=1)
     icint = vg.icint
+    work = _get_recon_work(vg)
     for ind in eachindex(icint)
         ic = icint[ind]
-        poly = defcell(vg, ic)
+        poly = defcell!(work.poly, work.ipg, vg, ic)
         neigs = vg.ineigb[ic]; nn = length(neigs)
-        fv = zeros(nn+1); vx = zeros(nn+1); vy = zeros(nn+1); vz = zeros(nn+1)
+        fv = work.fv
+        vx = work.vx
+        vy = work.vy
+        vz = work.vz
         for ii in 1:nn
             ic2 = neigs[ii]; fv[ii] = vg.fractg[ic2]
             vx[ii] = vg.ccell[ic2,1]; vy[ii] = vg.ccell[ic2,2]; vz[ii] = vg.ccell[ic2,3]
         end
         fv[nn+1] = vg.fractg[ic]
         vx[nn+1] = vg.ccell[ic,1]; vy[nn+1] = vg.ccell[ic,2]; vz[nn+1] = vg.ccell[ic,3]
-        xn, yn, zn = lsrec(fv, vx, vy, vz, pn)
+        xn, yn, zn = lsrec(@view(fv[1:nn+1]), @view(vx[1:nn+1]),
+                           @view(vy[1:nn+1]), @view(vz[1:nn+1]), pn)
         vg.xnormg[ic] = xn; vg.ynormg[ic] = yn; vg.znormg[ic] = zn
         c = _enforce_volume(vg, ic, poly, xn, yn, zn; igrid)
         vg.rholig[ic] = c
@@ -514,7 +694,7 @@ end
 Inner Swartz procedure for a single cell.
 """
 function swrec(vg::VOFGrid, ic::Int, cplic::Matrix{Float64},
-               markplic::Vector{Int}; igrid::Int=1)
+               markplic::Vector{Int}, work::_ReconWork; igrid::Int=1)
     neigs = vg.ineigb[ic]
     xnsw = ynsw = znsw = 0.0
     nsw = 0
@@ -544,14 +724,14 @@ function swrec(vg::VOFGrid, ic::Int, cplic::Matrix{Float64},
         for iter in 1:10
             xn0, yn0, zn0 = xn, yn, zn
             # Compute PLIC centroids for IC and IC2 with normal (xn0,yn0,zn0)
-            poly1 = defcell(vg, ic)
+            poly1 = defcell!(work.poly1, work.ipg, vg, ic)
             c1 = _enforce_volume(vg, ic, poly1, xn0, yn0, zn0; igrid)
             nts1 = poly1.nts
             inte3d!(poly1, c1, xn0, yn0, zn0)
             ct1 = _plic_centroid(poly1, nts1)
             ct1 === nothing && (ct1 = (cplic[ic,1], cplic[ic,2], cplic[ic,3]))
 
-            poly2 = defcell(vg, ic2)
+            poly2 = defcell!(work.poly2, work.ipg, vg, ic2)
             v2 = vg.fractg[ic2] * vg.vcell[ic2]; vt2 = vg.vcell[ic2]
             if igrid == 1
                 c2 = enforv3dsz(vg.boxcell[ic2,2]-vg.boxcell[ic2,1],
@@ -591,26 +771,37 @@ end
 PLIC reconstruction using the Swartz iterative algorithm.
 """
 function swir!(vg::VOFGrid; pn::Float64=1.5, niter::Int=4, tolir::Float64=0.001, igrid::Int=1)
-    g     = vg.grid
-    ncell = g.ncell
     icint = vg.icint
+    work  = _get_recon_work(vg)
 
-    cplic = zeros(ncell, 3)
-    markplic    = zeros(Int, ncell)
-    markplicend = zeros(Int, ncell)
+    cplic = work.cplic
+    cplic2 = work.cplic2
+    markplic = work.mark
+    markplicend = work.mark2
+    xnorm2 = work.xnorm2
+    ynorm2 = work.ynorm2
+    znorm2 = work.znorm2
+    rholi2 = work.rholi2
+    alpha = work.alpha
+    fill!(markplic, 0)
+    fill!(markplicend, 0)
 
     # Init with LSGIR
     for ind in eachindex(icint)
         ic = icint[ind]
-        poly = defcell(vg, ic)
+        poly = defcell!(work.poly, work.ipg, vg, ic)
         neigs = vg.ineigb[ic]; nn = length(neigs)
-        fv = zeros(nn+1); vx = zeros(nn+1); vy = zeros(nn+1); vz = zeros(nn+1)
+        fv = work.fv
+        vx = work.vx
+        vy = work.vy
+        vz = work.vz
         for ii in 1:nn
             ic2 = neigs[ii]; fv[ii] = vg.fractg[ic2]
             vx[ii] = vg.ccell[ic2,1]; vy[ii] = vg.ccell[ic2,2]; vz[ii] = vg.ccell[ic2,3]
         end
         fv[nn+1] = vg.fractg[ic]; vx[nn+1] = vg.ccell[ic,1]; vy[nn+1] = vg.ccell[ic,2]; vz[nn+1] = vg.ccell[ic,3]
-        xn, yn, zn = lsrec(fv, vx, vy, vz, pn)
+        xn, yn, zn = lsrec(@view(fv[1:nn+1]), @view(vx[1:nn+1]),
+                           @view(vy[1:nn+1]), @view(vz[1:nn+1]), pn)
         vg.xnormg[ic] = xn; vg.ynormg[ic] = yn; vg.znormg[ic] = zn
         c = _enforce_volume(vg, ic, poly, xn, yn, zn; igrid)
         vg.rholig[ic] = c
@@ -619,14 +810,12 @@ function swir!(vg::VOFGrid; pn::Float64=1.5, niter::Int=4, tolir::Float64=0.001,
         inte3d!(poly, c, xn, yn, zn)
         ctr = _plic_centroid(poly, nts_before)
         if ctr !== nothing
-            cplic[ic,:] .= ctr; markplic[ic] = 1
+            cplic[ic,1] = ctr[1]
+            cplic[ic,2] = ctr[2]
+            cplic[ic,3] = ctr[3]
+            markplic[ic] = 1
         end
     end
-
-    # Swartz iterations
-    xnorm2 = zeros(ncell); ynorm2 = zeros(ncell); znorm2 = zeros(ncell)
-    rholi2 = zeros(ncell); alpha  = zeros(ncell)
-    cplic2 = zeros(ncell, 3)
 
     for iter in 1:niter
         alphalim = 0.523599 / iter  # 30°/iter
@@ -634,19 +823,27 @@ function swir!(vg::VOFGrid; pn::Float64=1.5, niter::Int=4, tolir::Float64=0.001,
         for ind in eachindex(icint)
             ic = icint[ind]
             (markplic[ic] == 0 || markplicend[ic] != 0) && continue
-            xn, yn, zn = swrec(vg, ic, cplic, markplic; igrid)
+            xn, yn, zn = swrec(vg, ic, cplic, markplic, work; igrid)
             xnorm2[ic] = xn; ynorm2[ic] = yn; znorm2[ic] = zn
             alpha[ic] = acos(clamp(vg.xnormg[ic]*xn + vg.ynormg[ic]*yn + vg.znormg[ic]*zn, -1.0, 1.0))
             alpha[ic] < tolir && (markplicend[ic] = 1)
             alpha[ic] < alphalim || continue
-            poly = defcell(vg, ic)
+            poly = defcell!(work.poly, work.ipg, vg, ic)
             c2 = _enforce_volume(vg, ic, poly, xn, yn, zn; igrid)
             rholi2[ic] = c2
             if iter < niter
                 nts_b = poly.nts
                 inte3d!(poly, c2, xn, yn, zn)
                 ctr = _plic_centroid(poly, nts_b)
-                cplic2[ic,:] .= ctr !== nothing ? ctr : cplic[ic,:]
+                if ctr !== nothing
+                    cplic2[ic,1] = ctr[1]
+                    cplic2[ic,2] = ctr[2]
+                    cplic2[ic,3] = ctr[3]
+                else
+                    cplic2[ic,1] = cplic[ic,1]
+                    cplic2[ic,2] = cplic[ic,2]
+                    cplic2[ic,3] = cplic[ic,3]
+                end
             end
         end
 
@@ -657,7 +854,11 @@ function swir!(vg::VOFGrid; pn::Float64=1.5, niter::Int=4, tolir::Float64=0.001,
             alpha[ic] < alphalim || continue
             vg.xnormg[ic] = xnorm2[ic]; vg.ynormg[ic] = ynorm2[ic]; vg.znormg[ic] = znorm2[ic]
             vg.rholig[ic] = rholi2[ic]
-            iter < niter && (cplic[ic,:] .= cplic2[ic,:])
+            if iter < niter
+                cplic[ic,1] = cplic2[ic,1]
+                cplic[ic,2] = cplic2[ic,2]
+                cplic[ic,3] = cplic2[ic,3]
+            end
         end
     end
     return nothing
@@ -672,26 +873,37 @@ end
 PLIC reconstruction using least-squares fitting of PLIC centroids.
 """
 function lsfir!(vg::VOFGrid; pn::Float64=1.5, niter::Int=4, tolir::Float64=0.001, igrid::Int=1)
-    g     = vg.grid
-    ncell = g.ncell
     icint = vg.icint
+    work  = _get_recon_work(vg)
 
-    cplic = zeros(ncell, 3)
-    markplic    = zeros(Int, ncell)
-    markplicend = zeros(Int, ncell)
+    cplic = work.cplic
+    cplic2 = work.cplic2
+    markplic = work.mark
+    markplicend = work.mark2
+    xnorm2 = work.xnorm2
+    ynorm2 = work.ynorm2
+    znorm2 = work.znorm2
+    rholi2 = work.rholi2
+    alpha = work.alpha
+    fill!(markplic, 0)
+    fill!(markplicend, 0)
 
     # Init with LSGIR
     for ind in eachindex(icint)
         ic = icint[ind]
-        poly = defcell(vg, ic)
+        poly = defcell!(work.poly, work.ipg, vg, ic)
         neigs = vg.ineigb[ic]; nn = length(neigs)
-        fv = zeros(nn+1); vx = zeros(nn+1); vy = zeros(nn+1); vz = zeros(nn+1)
+        fv = work.fv
+        vx = work.vx
+        vy = work.vy
+        vz = work.vz
         for ii in 1:nn
             ic2 = neigs[ii]; fv[ii] = vg.fractg[ic2]
             vx[ii] = vg.ccell[ic2,1]; vy[ii] = vg.ccell[ic2,2]; vz[ii] = vg.ccell[ic2,3]
         end
         fv[nn+1] = vg.fractg[ic]; vx[nn+1] = vg.ccell[ic,1]; vy[nn+1] = vg.ccell[ic,2]; vz[nn+1] = vg.ccell[ic,3]
-        xn, yn, zn = lsrec(fv, vx, vy, vz, pn)
+        xn, yn, zn = lsrec(@view(fv[1:nn+1]), @view(vx[1:nn+1]),
+                           @view(vy[1:nn+1]), @view(vz[1:nn+1]), pn)
         vg.xnormg[ic] = xn; vg.ynormg[ic] = yn; vg.znormg[ic] = zn
         c = _enforce_volume(vg, ic, poly, xn, yn, zn; igrid)
         vg.rholig[ic] = c
@@ -700,13 +912,12 @@ function lsfir!(vg::VOFGrid; pn::Float64=1.5, niter::Int=4, tolir::Float64=0.001
         inte3d!(poly, c, xn, yn, zn)
         ctr = _plic_centroid(poly, nts_before)
         if ctr !== nothing
-            cplic[ic,:] .= ctr; markplic[ic] = 1
+            cplic[ic,1] = ctr[1]
+            cplic[ic,2] = ctr[2]
+            cplic[ic,3] = ctr[3]
+            markplic[ic] = 1
         end
     end
-
-    xnorm2 = zeros(ncell); ynorm2 = zeros(ncell); znorm2 = zeros(ncell)
-    rholi2 = zeros(ncell); alpha  = zeros(ncell)
-    cplic2 = zeros(ncell, 3)
 
     for iter in 1:niter
         alphalim = 0.523599 / iter
@@ -717,9 +928,8 @@ function lsfir!(vg::VOFGrid; pn::Float64=1.5, niter::Int=4, tolir::Float64=0.001
 
             neigs = vg.ineigb[ic]
             n = 0
-            max_n = length(neigs)
-            vcx = zeros(max_n+1); vcy = zeros(max_n+1); vcz = zeros(max_n+1)
-            nnx = zeros(max_n+1); nny = zeros(max_n+1); nnz = zeros(max_n+1)
+            vcx = work.vcx; vcy = work.vcy; vcz = work.vcz
+            nnx = work.nnx; nny = work.nny; nnz = work.nnz
             for icn in neigs
                 markplic[icn] == 1 || continue
                 n += 1
@@ -729,20 +939,28 @@ function lsfir!(vg::VOFGrid; pn::Float64=1.5, niter::Int=4, tolir::Float64=0.001
             vcx[n+1] = cplic[ic,1]; vcy[n+1] = cplic[ic,2]; vcz[n+1] = cplic[ic,3]
             nnx[n+1] = vg.xnormg[ic]; nny[n+1] = vg.ynormg[ic]; nnz[n+1] = vg.znormg[ic]
 
-            xn, yn, zn = lsfrec(vcx[1:n+1], vcy[1:n+1], vcz[1:n+1],
-                                 nnx[1:n+1], nny[1:n+1], nnz[1:n+1])
+            xn, yn, zn = lsfrec(@view(vcx[1:n+1]), @view(vcy[1:n+1]), @view(vcz[1:n+1]),
+                                 @view(nnx[1:n+1]), @view(nny[1:n+1]), @view(nnz[1:n+1]))
             xnorm2[ic] = xn; ynorm2[ic] = yn; znorm2[ic] = zn
             alpha[ic] = acos(clamp(vg.xnormg[ic]*xn + vg.ynormg[ic]*yn + vg.znormg[ic]*zn, -1.0, 1.0))
             alpha[ic] < tolir && (markplicend[ic] = 1)
             alpha[ic] < alphalim || continue
-            poly = defcell(vg, ic)
+            poly = defcell!(work.poly, work.ipg, vg, ic)
             c2 = _enforce_volume(vg, ic, poly, xn, yn, zn; igrid)
             rholi2[ic] = c2
             if iter < niter
                 nts_b = poly.nts
                 inte3d!(poly, c2, xn, yn, zn)
                 ctr = _plic_centroid(poly, nts_b)
-                cplic2[ic,:] .= ctr !== nothing ? ctr : cplic[ic,:]
+                if ctr !== nothing
+                    cplic2[ic,1] = ctr[1]
+                    cplic2[ic,2] = ctr[2]
+                    cplic2[ic,3] = ctr[3]
+                else
+                    cplic2[ic,1] = cplic[ic,1]
+                    cplic2[ic,2] = cplic[ic,2]
+                    cplic2[ic,3] = cplic[ic,3]
+                end
             end
         end
 
@@ -752,7 +970,11 @@ function lsfir!(vg::VOFGrid; pn::Float64=1.5, niter::Int=4, tolir::Float64=0.001
             alpha[ic] < alphalim || continue
             vg.xnormg[ic] = xnorm2[ic]; vg.ynormg[ic] = ynorm2[ic]; vg.znormg[ic] = znorm2[ic]
             vg.rholig[ic] = rholi2[ic]
-            iter < niter && (cplic[ic,:] .= cplic2[ic,:])
+            if iter < niter
+                cplic[ic,1] = cplic2[ic,1]
+                cplic[ic,2] = cplic2[ic,2]
+                cplic[ic,3] = cplic2[ic,3]
+            end
         end
     end
     return nothing

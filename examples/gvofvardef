@@ -1,0 +1,44 @@
+Case number, ICASE:
+3
+Interface reconstruction method, IREC:
+1
+Distance weighting parameter for the LSGIR method, PN:
+1.5
+Weighted factor for the LLCIR, ELCIR and CLCIR methods, IW:
+1
+Outer iterations and tolerance for SWIR or LSFIR method, NITER TOLIR:
+4 0.001
+Interface advection method, IADV:
+1
+Cadence for results printing, TCADEN:
+0.1
+Print PLIC results, IPRINTPLIC (1 active, 0 inactive):
+1
+Print iso-surface results, IPRINTISO (1 active, 0 inactive):
+0
+Print voxelization results, IPRINTVOXEL (1 active, 0 inactive):
+0
+Subdivisions for initialization or reconst. error computation, NC:
+10
+Tolerance for the volume fraction, TOLFR:
+1.0E-12
+Time step calculation, IDT (0 fixed time step; 1 CFL condition):
+1
+Fixed time step (IDT=0), DT:
+0.00001
+Courant-Friedrich-Levy number (IDT=1), CFL:
+0.5
+Grid type, IGRID (1 uniform grids; 2 or 3 grids with OpenFOAM format):
+1
+Voxels (IPRINTVOXEL=1) or cells (IGRID=1) number along X, NX:
+64
+Voxels (IPRINTVOXEL=1) or cells (IGRID=1) number along Y, NY:
+64
+Voxels (IPRINTVOXEL=1) or cells (IGRID=1) number along Z, NZ:
+64
+Grid size along X for IGRID=1, XLAST:
+1.0
+Grid size along Y for IGRID=1, YLAST:
+1.0
+Grid size along Z for IGRID=1, ZLAST:
+1.0

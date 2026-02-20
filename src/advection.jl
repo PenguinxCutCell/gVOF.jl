@@ -349,6 +349,308 @@ function nmfp!(dt::Float64, nivface::Int, vertp_in::Matrix{Float64},
     return (ipv, nipv, nts, ntp, vertp, xns, yns, zns, vfactor)
 end
 
+mutable struct _FaceFluxWork
+    poly_base::Polyhedron3D
+    poly_tmp::Polyhedron3D
+    poly_save::Polyhedron3D
+    face_verts::Matrix{Float64}
+    face_vel::Matrix{Float64}
+    base_verts::Matrix{Float64}
+    edge::Matrix{Float64}
+    vele::Matrix{Float64}
+    icflux0::Vector{Int}
+    icflux1::Vector{Int}
+    icfluxi::Vector{Int}
+end
+
+function _faceflux_poly_buffer()
+    ns_max = VOFTools.NS_DEFAULT
+    nv_max = VOFTools.NV_DEFAULT
+    return Polyhedron3D(
+        zeros(nv_max, 3),
+        zeros(Int, ns_max, nv_max),
+        zeros(Int, ns_max),
+        zeros(ns_max),
+        zeros(ns_max),
+        zeros(ns_max),
+        0, 0, 0,
+    )
+end
+
+function _FaceFluxWork(vg::VOFGrid)
+    max_facev = maximum(length, vg.grid.ipface)
+    nv_max = VOFTools.NV_DEFAULT
+    return _FaceFluxWork(
+        _faceflux_poly_buffer(),
+        _faceflux_poly_buffer(),
+        _faceflux_poly_buffer(),
+        zeros(max_facev, 3),
+        zeros(max_facev, 3),
+        zeros(nv_max, 3),
+        zeros(max_facev, 3),
+        zeros(max_facev, 3),
+        Int[],
+        Int[],
+        Int[],
+    )
+end
+
+function _get_faceflux_work(vg::VOFGrid)
+    tls = task_local_storage()
+    cache_any = get(tls, :_gvof_faceflux_work, nothing)
+    cache = if cache_any === nothing
+        c = Dict{UInt, _FaceFluxWork}()
+        tls[:_gvof_faceflux_work] = c
+        c
+    else
+        cache_any::Dict{UInt, _FaceFluxWork}
+    end
+    key = objectid(vg)
+    work = get(cache, key, nothing)
+    if work === nothing
+        work = _FaceFluxWork(vg)
+        cache[key] = work
+    end
+    return work::_FaceFluxWork
+end
+
+function _emfp_build!(poly::Polyhedron3D, work::_FaceFluxWork, dt::Float64,
+                      nivface::Int, vertp_in::AbstractMatrix{Float64},
+                      vel::AbstractMatrix{Float64}, v::Float64)
+    nf = nivface
+    nts = nf * 5 + 1
+    ntp = 3 * nf + 1
+    ntv = ntp
+
+    vertp = poly.vertp
+    ipv   = poly.ipv
+    nipv  = poly.nipv
+    xns   = poly.xns
+    yns   = poly.yns
+    zns   = poly.zns
+
+    for ip in 1:nf, i in 1:3
+        vertp[ip,i] = vertp_in[ip,i]
+    end
+    for ip in 1:nf, i in 1:3
+        vertp[nf+ip,i] = vertp[ip,i] - vel[ip,i] * dt
+    end
+
+    vertp[3*nf+1,:] .= 0.0
+    for ip in 1:nf
+        ip1 = ip == nf ? 1 : ip + 1
+        for i in 1:3
+            vertp[2*nf+ip,i] = (vertp[ip,i] + vertp[nf+ip,i] + vertp[ip1,i] + vertp[nf+ip1,i]) / 4.0
+            vertp[3*nf+1,i] += vertp[nf+ip,i] / nf
+        end
+    end
+
+    nipv[1] = nf
+    for ip in 1:nf
+        ipv[1,ip] = ip
+    end
+
+    for ip in 1:nf
+        ip1 = ip == nf ? 1 : ip + 1
+        is = (ip - 1) * 4 + 2
+        nipv[is] = 3; ipv[is,1] = ip;     ipv[is,2] = nf+ip;  ipv[is,3] = 2*nf+ip
+        is += 1
+        nipv[is] = 3; ipv[is,1] = ip1;    ipv[is,2] = ip;     ipv[is,3] = 2*nf+ip
+        is += 1
+        nipv[is] = 3; ipv[is,1] = nf+ip1; ipv[is,2] = ip1;    ipv[is,3] = 2*nf+ip
+        is += 1
+        nipv[is] = 3; ipv[is,1] = nf+ip;  ipv[is,2] = nf+ip1; ipv[is,3] = 2*nf+ip
+    end
+
+    for ip in 1:nf
+        ip1 = ip == nf ? 1 : ip + 1
+        is = 1 + 4*nf + ip
+        nipv[is] = 3
+        ipv[is,1] = nf+ip1; ipv[is,2] = nf+ip; ipv[is,3] = 3*nf+1
+    end
+
+    poly.nts = nts
+    poly.ntp = ntp
+    poly.ntv = ntv
+
+    _compute_normals!(xns, yns, zns, ipv, nipv, nts, vertp)
+
+    vini = toolv3d(ipv, nipv, nts, vertp, xns, yns, zns)
+    vcor = v - vini
+    base = work.base_verts
+    for ip in 1:nf, i in 1:3
+        base[ip,i] = vertp[nf+ip,i]
+    end
+    ie, apex = polv(nf, vcor, base)
+
+    vfactor = 1.0
+    if ie == 0
+        vfactor = vini == 0 ? 1.0 : v / vini
+    else
+        vertp[ntv,1] = apex[1]; vertp[ntv,2] = apex[2]; vertp[ntv,3] = apex[3]
+        for is in (nts-nf+1):nts
+            _compute_normals!(xns, yns, zns, ipv, nipv, is:is, vertp)
+        end
+    end
+    return vfactor
+end
+
+function _fmfp_build!(poly::Polyhedron3D, work::_FaceFluxWork, dt::Float64,
+                      nivface::Int, vertp_in::AbstractMatrix{Float64},
+                      vel::AbstractMatrix{Float64}, v::Float64)
+    nf = nivface
+    nts = nf * 2 + 1
+    ntp = 2 * nf + 1
+    ntv = ntp
+
+    vertp = poly.vertp
+    ipv   = poly.ipv
+    nipv  = poly.nipv
+    xns   = poly.xns
+    yns   = poly.yns
+    zns   = poly.zns
+    edge  = work.edge
+    vele  = work.vele
+
+    for ip in 1:nf, i in 1:3
+        vertp[ip,i] = vertp_in[ip,i]
+    end
+
+    for ip in 1:nf
+        ip2 = ip == nf ? 1 : ip + 1
+        for i in 1:3
+            vele[ip,i] = (vel[ip,i] + vel[ip2,i]) / 2
+        end
+        xv = vertp[ip2,1] - vertp[ip,1]
+        yv = vertp[ip2,2] - vertp[ip,2]
+        zv = vertp[ip2,3] - vertp[ip,3]
+        xn = yv*vele[ip,3] - zv*vele[ip,2]
+        yn = zv*vele[ip,1] - xv*vele[ip,3]
+        zn = xv*vele[ip,2] - yv*vele[ip,1]
+        dmod = sqrt(xn^2 + yn^2 + zn^2)
+        if dmod != 0
+            xns[ip+1] = xn / dmod; yns[ip+1] = yn / dmod; zns[ip+1] = zn / dmod
+        end
+    end
+
+    for ip in 1:nf
+        is0 = ip == 1 ? nf+1 : ip
+        is = ip + 1
+        edge[ip,1] = yns[is0]*zns[is] - zns[is0]*yns[is]
+        edge[ip,2] = zns[is0]*xns[is] - xns[is0]*zns[is]
+        edge[ip,3] = xns[is0]*yns[is] - yns[is0]*xns[is]
+        dmod = sqrt(edge[ip,1]^2 + edge[ip,2]^2 + edge[ip,3]^2)
+        if dmod != 0
+            edge[ip,1] /= dmod; edge[ip,2] /= dmod; edge[ip,3] /= dmod
+        end
+        velmod = dt * (vel[ip,1]*edge[ip,1] + vel[ip,2]*edge[ip,2] + vel[ip,3]*edge[ip,3])
+        for i in 1:3
+            vertp[nf+ip,i] = vertp[ip,i] - velmod * edge[ip,i]
+        end
+    end
+
+    vertp[2*nf+1,:] .= 0.0
+    for ip in 1:nf, i in 1:3
+        vertp[2*nf+1,i] += vertp[nf+ip,i] / nf
+    end
+
+    nipv[1] = nf
+    for ip in 1:nf
+        ipv[1,ip] = ip
+    end
+
+    for ip in 1:nf
+        ip1 = ip == nf ? 1 : ip + 1
+        is = ip + 1
+        nipv[is] = 4
+        ipv[is,1] = ip; ipv[is,2] = nf+ip; ipv[is,3] = nf+ip1; ipv[is,4] = ip1
+    end
+
+    for ip in 1:nf
+        ip1 = ip == nf ? 1 : ip + 1
+        is = 1 + nf + ip
+        nipv[is] = 3
+        ipv[is,1] = nf+ip1; ipv[is,2] = nf+ip; ipv[is,3] = 2*nf+1
+    end
+
+    poly.nts = nts
+    poly.ntp = ntp
+    poly.ntv = ntv
+
+    for is in (nf+2):nts
+        _compute_normals!(xns, yns, zns, ipv, nipv, is:is, vertp)
+    end
+
+    vini = toolv3d(ipv, nipv, nts, vertp, xns, yns, zns)
+    vcor = v - vini
+    base = work.base_verts
+    for ip in 1:nf, i in 1:3
+        base[ip,i] = vertp[nf+ip,i]
+    end
+    ie, apex = polv(nf, vcor, base)
+
+    vfactor = 1.0
+    if ie == 0
+        vfactor = vini == 0 ? 1.0 : v / vini
+    else
+        vertp[ntv,1] = apex[1]; vertp[ntv,2] = apex[2]; vertp[ntv,3] = apex[3]
+        for is in (nts-nf+1):nts
+            _compute_normals!(xns, yns, zns, ipv, nipv, is:is, vertp)
+        end
+    end
+    return vfactor
+end
+
+function _nmfp_build!(poly::Polyhedron3D, dt::Float64, nivface::Int,
+                      vertp_in::AbstractMatrix{Float64},
+                      vfx::Float64, vfy::Float64, vfz::Float64, v::Float64)
+    nf = nivface
+    nts = nf + 2
+    ntp = 2 * nf
+    ntv = ntp
+
+    vertp = poly.vertp
+    ipv   = poly.ipv
+    nipv  = poly.nipv
+    xns   = poly.xns
+    yns   = poly.yns
+    zns   = poly.zns
+
+    for ip in 1:nf, i in 1:3
+        vertp[ip,i] = vertp_in[ip,i]
+    end
+    for ip in 1:nf, i in 1:3
+        vel_i = (i == 1 ? vfx : (i == 2 ? vfy : vfz))
+        vertp[nf+ip,i] = vertp[ip,i] - vel_i * dt
+    end
+
+    nipv[1] = nf
+    for ip in 1:nf
+        ipv[1,ip] = ip
+    end
+
+    for ip in 1:nf
+        ip1 = ip == nf ? 1 : ip + 1
+        is = ip + 1
+        nipv[is] = 4
+        ipv[is,1] = ip; ipv[is,2] = nf+ip; ipv[is,3] = nf+ip1; ipv[is,4] = ip1
+    end
+
+    is = nts
+    nipv[is] = nf
+    for ip in 1:nf
+        ipv[is,ip] = ntp - ip + 1
+    end
+
+    poly.nts = nts
+    poly.ntp = ntp
+    poly.ntv = ntv
+
+    _compute_normals!(xns, yns, zns, ipv, nipv, nts, vertp)
+    vini = toolv3d(ipv, nipv, nts, vertp, xns, yns, zns)
+    return vini == 0.0 ? 1.0 : v / vini
+end
+
 # ═══════════════════════════════════════════════════════════════════════════
 #  CELLDFLUX – cell decomposition for flux computation
 # ═══════════════════════════════════════════════════════════════════════════
@@ -468,6 +770,7 @@ function faceflux!(vg::VOFGrid; dt::Float64, iadv::Int=1,
     g     = vg.grid
     nface = g.nface
     isflu = vg.isflu
+    work  = _get_faceflux_work(vg)
 
     # Pre-compute signed volumes for all faces
     for iface in 1:nface
@@ -487,29 +790,39 @@ function faceflux!(vg::VOFGrid; dt::Float64, iadv::Int=1,
         nivface = length(g.ipface[iface])
 
         # Gather face vertex coords and velocities
-        face_verts = zeros(nivface, 3)
-        face_vel   = zeros(nivface, 3)
+        face_verts = work.face_verts
+        face_vel   = work.face_vel
         for i in 1:nivface
             ip = g.ipface[iface][i]
-            face_verts[i,:] .= g.vnode[ip,:]
-            face_vel[i,:]   .= vg.velnode[ip,:]
+            face_verts[i,1] = g.vnode[ip,1]
+            face_verts[i,2] = g.vnode[ip,2]
+            face_verts[i,3] = g.vnode[ip,3]
+            face_vel[i,1] = vg.velnode[ip,1]
+            face_vel[i,2] = vg.velnode[ip,2]
+            face_vel[i,3] = vg.velnode[ip,3]
         end
 
         v = vg.volpol[iface]
+        poly_base = work.poly_base
 
         # Build flux polyhedron
         if iadv == 1
-            ipv, nipv, nts, ntp, vertp, xns, yns, zns, vfactor =
-                emfp!(dt, nivface, face_verts, face_vel, v)
+            vfactor = _emfp_build!(poly_base, work, dt, nivface,
+                                   face_verts, face_vel, v)
         elseif iadv == 2
-            ipv, nipv, nts, ntp, vertp, xns, yns, zns, vfactor =
-                fmfp!(dt, nivface, face_verts, face_vel, v)
+            vfactor = _fmfp_build!(poly_base, work, dt, nivface,
+                                   face_verts, face_vel, v)
         else
-            ipv, nipv, nts, ntp, vertp, xns, yns, zns, vfactor =
-                nmfp!(dt, nivface, face_verts, @view(vg.velface[iface,:]), v)
+            vfactor = _nmfp_build!(poly_base, dt, nivface,
+                                   face_verts,
+                                   vg.velface[iface,1],
+                                   vg.velface[iface,2],
+                                   vg.velface[iface,3], v)
         end
 
         # Bounding box of flux polyhedron
+        ntp = poly_base.ntp
+        vertp = poly_base.vertp
         fp_xmin = fp_ymin = fp_zmin =  1e16
         fp_xmax = fp_ymax = fp_zmax = -1e16
         for ip in 1:ntp
@@ -529,14 +842,14 @@ function faceflux!(vg::VOFGrid; dt::Float64, iadv::Int=1,
         end
 
         # Build candidate cell list via bounding-box checks
-        icflux0 = Int[]   # cells with f ≈ 0
-        icflux1 = Int[]   # cells with f ≈ 1
-        icfluxi = Int[]   # interface cells
+        icflux0 = work.icflux0   # cells with f ≈ 0
+        icflux1 = work.icflux1   # cells with f ≈ 1
+        icfluxi = work.icfluxi   # interface cells
+        empty!(icflux0); empty!(icflux1); empty!(icfluxi)
         tot_xmin = tot_ymin = tot_zmin =  1e16
         tot_xmax = tot_ymax = tot_zmax = -1e16
 
-        candidates = push!(copy(vg.ineigb[icref]), icref)
-        for ic in candidates
+        for ic in vg.ineigb[icref]
             cx1 = vg.boxcell[ic,1]; cx2 = vg.boxcell[ic,2]
             cy1 = vg.boxcell[ic,3]; cy2 = vg.boxcell[ic,4]
             cz1 = vg.boxcell[ic,5]; cz2 = vg.boxcell[ic,6]
@@ -556,12 +869,31 @@ function faceflux!(vg::VOFGrid; dt::Float64, iadv::Int=1,
                 push!(icflux1, ic)
             end
         end
+        ic = icref
+        cx1 = vg.boxcell[ic,1]; cx2 = vg.boxcell[ic,2]
+        cy1 = vg.boxcell[ic,3]; cy2 = vg.boxcell[ic,4]
+        cz1 = vg.boxcell[ic,5]; cz2 = vg.boxcell[ic,6]
+        tot_xmin = min(tot_xmin, cx1); tot_xmax = max(tot_xmax, cx2)
+        tot_ymin = min(tot_ymin, cy1); tot_ymax = max(tot_ymax, cy2)
+        tot_zmin = min(tot_zmin, cz1); tot_zmax = max(tot_zmax, cz2)
+        if !(cx2 ≤ fp_xmin || cx1 ≥ fp_xmax || cy2 ≤ fp_ymin || cy1 ≥ fp_ymax || cz2 ≤ fp_zmin || cz1 ≥ fp_zmax)
+            if vg.fractg[ic] < tolfr
+                push!(icflux0, ic)
+            elseif vg.fractg[ic] > (1-tolfr)
+                push!(icflux1, ic)
+            else
+                push!(icfluxi, ic)
+                push!(icflux0, ic)
+                push!(icflux1, ic)
+            end
+        end
 
         # Compute volumetric flux
         vflu = 0.0
         n0 = length(icflux0) - length(icfluxi)
         n1 = length(icflux1) - length(icfluxi)
         ni = length(icfluxi)
+        signflux = 1.0
 
         if (ni + n0 + n1) != 0
             if ni == 0 && n0 == 0
@@ -578,11 +910,10 @@ function faceflux!(vg::VOFGrid; dt::Float64, iadv::Int=1,
                     icflux = icflux1
                 end
 
+                poly_tmp = work.poly_tmp
+                poly_save = work.poly_save
                 for ic in icflux
-                    # Copy current flux polyhedron for intersection
-                    ipv0  = copy(ipv); nipv0 = copy(nipv)
-                    nts0  = nts; ntp0 = ntp
-                    vertp0 = copy(vertp); xns0 = copy(xns); yns0 = copy(yns); zns0 = copy(zns)
+                    cppol3d!(poly_tmp, poly_base)
 
                     # Intersect with PLIC interface
                     if vg.fractg[ic] > tolfr && vg.fractg[ic] < (1-tolfr)
@@ -591,51 +922,55 @@ function faceflux!(vg::VOFGrid; dt::Float64, iadv::Int=1,
                         znc = vg.znormg[ic]*signflux
                         c_plic = vg.rholig[ic]*signflux
 
-                        poly0 = Polyhedron3D(vertp0, ipv0, nipv0, xns0, yns0, zns0,
-                                            nts0, ntp0, ntp0)
-                        icontn, icontp = inte3d!(poly0, c_plic, xnc, ync, znc)
+                        icontn, icontp = inte3d!(poly_tmp, c_plic, xnc, ync, znc)
                         icontp == 0 && @goto next_cell
-                        nts0 = poly0.nts; ntp0 = poly0.ntp
-                        vertp0 = poly0.vertp; ipv0 = poly0.ipv; nipv0 = poly0.nipv
-                        xns0 = poly0.xns; yns0 = poly0.yns; zns0 = poly0.zns
                     end
 
                     # Intersect with cell faces
-                    decomp = celldflux(vg, ic, igrid, fp_xmin, fp_xmax,
-                                       fp_ymin, fp_ymax, fp_zmin, fp_zmax)
-
-                    ipv_save = nothing
                     if igrid == 3
-                        ipv_save = (copy(ipv0), copy(nipv0), nts0, ntp0,
-                                    copy(vertp0), copy(xns0), copy(yns0), copy(zns0))
-                    end
-
-                    for (di, d) in enumerate(decomp)
-                        if igrid == 3 && di > 1
-                            # Restore from save
-                            ipv0, nipv0, nts0, ntp0, vertp0, xns0, yns0, zns0 = ipv_save
-                            ipv0 = copy(ipv0); nipv0 = copy(nipv0)
-                            vertp0 = copy(vertp0); xns0 = copy(xns0); yns0 = copy(yns0); zns0 = copy(zns0)
+                        decomp = celldflux(vg, ic, igrid, fp_xmin, fp_xmax,
+                                           fp_ymin, fp_ymax, fp_zmin, fp_zmax)
+                        cppol3d!(poly_save, poly_tmp)
+                        for (di, d) in enumerate(decomp)
+                            if di > 1
+                                cppol3d!(poly_tmp, poly_save)
+                            end
+                            cont = false
+                            for i in eachindex(d.xnf)
+                                icontn, icontp = inte3d!(poly_tmp, d.rhof[i],
+                                                         d.xnf[i], d.ynf[i], d.znf[i])
+                                if icontp == 0
+                                    cont = true
+                                    break
+                                end
+                            end
+                            cont && continue
+                            vol_trunc = toolv3d(poly_tmp)
+                            vflu += vol_trunc * d.isign
                         end
-
+                    else
                         cont = false
-                        for i in eachindex(d.xnf)
-                            poly0 = Polyhedron3D(vertp0, ipv0, nipv0, xns0, yns0, zns0,
-                                                nts0, ntp0, ntp0)
-                            icontn, icontp = inte3d!(poly0, d.rhof[i],
-                                                     d.xnf[i], d.ynf[i], d.znf[i])
-                            nts0 = poly0.nts; ntp0 = poly0.ntp
-                            vertp0 = poly0.vertp; ipv0 = poly0.ipv; nipv0 = poly0.nipv
-                            xns0 = poly0.xns; yns0 = poly0.yns; zns0 = poly0.zns
+                        nsc = length(g.iscell[ic])
+                        for is in 1:nsc
+                            ifacec = g.iscell[ic][is]
+                            if g.icface[ifacec,1] == ic
+                                xnf = -vg.xnface[ifacec]
+                                ynf = -vg.ynface[ifacec]
+                                znf = -vg.znface[ifacec]
+                            else
+                                xnf = vg.xnface[ifacec]
+                                ynf = vg.ynface[ifacec]
+                                znf = vg.znface[ifacec]
+                            end
+                            ip0 = g.ipface[ifacec][1]
+                            rhof = -(xnf*g.vnode[ip0,1] + ynf*g.vnode[ip0,2] + znf*g.vnode[ip0,3])
+                            icontn, icontp = inte3d!(poly_tmp, rhof, xnf, ynf, znf)
                             if icontp == 0
-                                cont = true; break
+                                cont = true
+                                break
                             end
                         end
-                        cont && continue
-
-                        # Compute truncated volume
-                        vol_trunc = toolv3d(ipv0, nipv0, nts0, vertp0, xns0, yns0, zns0)
-                        vflu += vol_trunc * d.isign
+                        !cont && (vflu += toolv3d(poly_tmp))
                     end
                     @label next_cell
                 end
@@ -654,6 +989,7 @@ end
 #  VOFADV – VOF advection with implicit divergence correction
 # ═══════════════════════════════════════════════════════════════════════════
 """
+    vofadv!(vg::VOFGrid, tolfr::Float64)
     vofadv!(vg::VOFGrid; tolfr=1e-12)
 
 Advance the volume fraction field using the face fluxes `vg.fface`.
@@ -661,12 +997,40 @@ Uses implicit divergence correction.
 
 Updates `vg.fractg` and accumulates boundedness errors in `vg.ebound`.
 """
-function vofadv!(vg::VOFGrid; tolfr::Float64=1e-12)
-    g     = vg.grid
-    ncell = g.ncell
-    icadv = vg.icadv
+mutable struct _VofAdvWork
+    fract0::Vector{Float64}
+end
 
-    fract0 = copy(vg.fractg)
+function _VofAdvWork(vg::VOFGrid)
+    return _VofAdvWork(zeros(vg.grid.ncell))
+end
+
+function _get_vofadv_work(vg::VOFGrid)
+    tls = task_local_storage()
+    cache_any = get(tls, :_gvof_vofadv_work, nothing)
+    cache = if cache_any === nothing
+        c = Dict{UInt, _VofAdvWork}()
+        tls[:_gvof_vofadv_work] = c
+        c
+    else
+        cache_any::Dict{UInt, _VofAdvWork}
+    end
+    key = objectid(vg)
+    work = get(cache, key, nothing)
+    if work === nothing
+        work = _VofAdvWork(vg)
+        cache[key] = work
+    end
+    return work::_VofAdvWork
+end
+
+function vofadv!(vg::VOFGrid, tolfr::Float64)
+    g     = vg.grid
+    icadv = vg.icadv
+    work = _get_vofadv_work(vg)
+    fract0 = work.fract0
+    copyto!(fract0, vg.fractg)
+
     funder = 0.0
     fover  = 0.0
 
@@ -703,3 +1067,5 @@ function vofadv!(vg::VOFGrid; tolfr::Float64=1e-12)
     vg.ebound[2] += max(funder, fover)
     return nothing
 end
+
+vofadv!(vg::VOFGrid; tolfr::Float64=1e-12) = vofadv!(vg, tolfr)

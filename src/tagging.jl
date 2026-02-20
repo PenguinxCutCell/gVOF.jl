@@ -7,6 +7,7 @@
 #  TAGGRID – IDW interpolation & three-level cell/face/node tagging
 # ═══════════════════════════════════════════════════════════════════════════
 """
+    taggrid!(vg::VOFGrid, tolfr::Float64)
     taggrid!(vg::VOFGrid; tolfr=1e-12)
 
 Classify every node, cell and face of the grid as *empty* (−1),
@@ -19,11 +20,41 @@ Classify every node, cell and face of the grid as *empty* (−1),
 Nodal volume fractions `vg.frnod` are obtained by Inverse-Distance
 Weighting (Shepard, p = 2) from the cell-centred values `vg.fractg`.
 """
-function taggrid!(vg::VOFGrid; tolfr::Float64=1e-12)
+mutable struct _TagWork
+    iadv::Vector{Int}
+end
+
+function _TagWork(vg::VOFGrid)
+    return _TagWork(zeros(Int, vg.grid.ncell))
+end
+
+function _get_tag_work(vg::VOFGrid)
+    tls = task_local_storage()
+    cache_any = get(tls, :_gvof_tag_work, nothing)
+    cache = if cache_any === nothing
+        c = Dict{UInt, _TagWork}()
+        tls[:_gvof_tag_work] = c
+        c
+    else
+        cache_any::Dict{UInt, _TagWork}
+    end
+    key = objectid(vg)
+    work = get(cache, key, nothing)
+    if work === nothing
+        work = _TagWork(vg)
+        cache[key] = work
+    end
+    return work::_TagWork
+end
+
+function taggrid!(vg::VOFGrid, tolfr::Float64)
     g = vg.grid
     ncell  = g.ncell
     nface  = g.nface
     npoint = g.npoint
+    work = _get_tag_work(vg)
+    iadv = work.iadv
+    fill!(iadv, 0)
 
     # ── 1) Node interpolation  (IDW, Shepard p = 2) ──────────────────
     for ip in 1:npoint
@@ -48,7 +79,6 @@ function taggrid!(vg::VOFGrid; tolfr::Float64=1e-12)
     end
 
     # ── 2) Cell tagging ───────────────────────────────────────────────
-    iadv = zeros(Int, ncell)
     for ic in 1:ncell
         if vg.fractg[ic] < tolfr
             vg.ictag[ic] = -1
@@ -58,11 +88,11 @@ function taggrid!(vg::VOFGrid; tolfr::Float64=1e-12)
             vg.ictag[ic] = 0
         end
     end
-    icint = Int[]
+    icint = vg.icint
+    empty!(icint)
     for ic in 1:ncell
         vg.ictag[ic] == 0 && push!(icint, ic)
     end
-    vg.icint = icint
 
     # ── 3) Face tagging ───────────────────────────────────────────────
     for iface in 1:nface
@@ -91,46 +121,53 @@ function taggrid!(vg::VOFGrid; tolfr::Float64=1e-12)
         end
     end
 
-    isflu = Int[]
+    isflu = vg.isflu
+    empty!(isflu)
     for iface in 1:nface
         vg.istag[iface] == 0 && push!(isflu, iface)
     end
-    vg.isflu = isflu
 
-    icadv = Int[]
+    icadv = vg.icadv
+    empty!(icadv)
     for ic in 1:ncell
         iadv[ic] == 1 && push!(icadv, ic)
     end
-    vg.icadv = icadv
 
     return nothing
 end
+
+taggrid!(vg::VOFGrid; tolfr::Float64=1e-12) = taggrid!(vg, tolfr)
 
 # ═══════════════════════════════════════════════════════════════════════════
 #  INITFGRID – initialise volume fractions using a level-set function
 # ═══════════════════════════════════════════════════════════════════════════
 """
-    initfgrid!(vg::VOFGrid, func3d::Function; nc=10, tolfr=1e-12)
+    initfgrid!(vg::VOFGrid, func3d, nc::Int, tolfr::Float64)
+    initfgrid!(vg::VOFGrid, func3d; nc=10, tolfr=1e-12)
 
 Initialise the volume fraction field `vg.fractg` by evaluating
 `func3d(x, y, z)` (positive inside the material) over each cell using
 `VOFTools.initf3d`.
 """
-function initfgrid!(vg::VOFGrid, func3d::Function; nc::Int=10,
-                    tolfr::Float64=1e-12)
+function initfgrid!(vg::VOFGrid, func3d::F, nc::Int,
+                    tolfr::Float64) where {F}
     g   = vg.grid
     vft = 0.0
+    work = _get_defcell_work(vg)
     for ic in 1:g.ncell
-        poly = defcell(vg, ic)
-        vf = initf3d(func3d, poly; nc=nc, tol=0.05)
+        poly = defcell!(work.poly, work.ipg, vg, ic)
+        vf = initf3d(func3d, poly, nc, 0.05)
         vf ≤ tolfr && (vf = 0.0)
         vf ≥ (1-tolfr) && (vf = 1.0)
         vg.fractg[ic] = vf
         vft += vf * vg.vcell[ic]
     end
-    @info "Initialised volume: $vft"
+    @debug "Initialised volume: $vft"
     return vft
 end
+
+initfgrid!(vg::VOFGrid, func3d::F; nc::Int=10,
+           tolfr::Float64=1e-12) where {F} = initfgrid!(vg, func3d, nc, tolfr)
 
 # ═══════════════════════════════════════════════════════════════════════════
 #  RECERR – reconstruction error computation
@@ -150,9 +187,10 @@ function recerr(vg::VOFGrid, func3d::Function;
     icint = vg.icint
 
     erec = 0.0
+    work = _get_defcell_work(vg)
     for ind in eachindex(icint)
         ic = icint[ind]
-        poly = defcell(vg, ic)
+        poly = defcell!(work.poly, work.ipg, vg, ic)
         xnc = vg.xnormg[ic]; ync = vg.ynormg[ic]; znc = vg.znormg[ic]
         c   = vg.rholig[ic]
 
@@ -160,7 +198,7 @@ function recerr(vg::VOFGrid, func3d::Function;
         icontn, icontp = inte3d!(poly, c, xnc, ync, znc)
         vcut = toolv3d(poly)
         # Exact fraction of the PLIC-truncated cell
-        vf = initf3d(func3d, poly; nc=nc, tol=0.05)
+        vf = initf3d(func3d, poly, nc, 0.05)
         erec += 2.0 * abs(vg.vcell[ic]*vg.fractg[ic] - vf*vcut)
     end
 

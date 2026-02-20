@@ -18,7 +18,6 @@ Translated from the Fortran gVOF library by J. Lopez and J. Hernandez (2021).
 module gVOF
 
 using ISOAP
-using ISOAP: niso
 using VOFTools
 using LinearAlgebra
 using Printf
@@ -31,7 +30,7 @@ export Polyhedron3D
 export VOFGrid, VOFParams
 
 # ── Grid operations ───────────────────────────────────────────────────────────
-export vofgrid, compgrid!, neigbcell!, defcell
+export vofgrid, vofgrid!, compgrid!, neigbcell!, defcell
 
 # ── Tagging & initialisation ─────────────────────────────────────────────────
 export taggrid!, initfgrid!, recerr

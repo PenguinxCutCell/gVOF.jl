@@ -76,7 +76,9 @@ function velgrid!(vg::VOFGrid, icase::Int, timet0::Float64, timet::Float64)
     npoint = g.npoint
     tn = (timet0 + timet) / 2
 
-    vg.velcmax .= 1e-16
+    vg.velcmax[1] = 1e-16
+    vg.velcmax[2] = 1e-16
+    vg.velcmax[3] = 1e-16
 
     if icase == 1
         # Simple translation v = (0,0,1)
