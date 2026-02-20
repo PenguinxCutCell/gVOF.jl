@@ -1,5 +1,7 @@
 # gVOF.jl
 
+![CI](https://github.com/PenguinxCutCell/gVOF.jl/workflows/CI/badge.svg)
+
 A Julia implementation of the geometrical Volume-of-Fluid (gVOF) method for interface tracking and reconstruction.
 
 **Original Work:** This package is a Julia translation of the Fortran gVOF library by J. Lopez and J. Hernandez (2021). All credits for the original research, algorithms, and Fortran implementation go to the original authors and contributors.
