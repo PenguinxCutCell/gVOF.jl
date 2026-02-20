@@ -39,8 +39,7 @@ jobs:
         run: |
           julia --project=docs -e '
             using Pkg
-            Pkg.develop([PackageSpec(path="https://github.com/PenguinxCutCell/isoap.jl"), PackageSpec(path="https://github.com/PenguinxCutCell/VOFTools.jl")])
-            Pkg.develop(PackageSpec(path=pwd()))
+            Pkg.develop([PackageSpec(path="https://github.com/PenguinxCutCell/isoap.jl"), PackageSpec(path="https://github.com/PenguinxCutCell/VOFTools.jl"), PackageSpec(path=pwd())])
             Pkg.instantiate()'
 
       - name: Build and deploy docs
