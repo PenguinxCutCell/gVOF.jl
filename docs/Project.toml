@@ -5,10 +5,5 @@ LiveServer = "16fef848-5104-11e9-1b77-fb7a48bbb589"
 VOFTools = "f4b4545c-59ad-49ee-afe8-a74df8bf51d2"
 gVOF = "04ededa1-a232-4018-ac62-0847248ccfed"
 
-[sources]
-ISOAP = {path = "../../isoap.jl"}
-VOFTools = {path = "../../VOFTools.jl"}
-gVOF = {path = ".."}
-
 [compat]
 Documenter = "1"
