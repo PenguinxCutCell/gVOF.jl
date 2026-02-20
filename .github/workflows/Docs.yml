@@ -39,8 +39,7 @@ jobs:
         run: |
           julia --project=docs -e '
             using Pkg
-            Pkg.develop(PackageSpec(url="https://github.com/PenguinxCutCell/isoap.jl"))
-            Pkg.develop(PackageSpec(url="https://github.com/PenguinxCutCell/VOFTools.jl"))
+            Pkg.develop(PackageSpec(url="https://github.com/PenguinxCutCell/isoap.jl"), PackageSpec(url="https://github.com/PenguinxCutCell/VOFTools.jl"))
             Pkg.develop(PackageSpec(path=pwd()))
             Pkg.instantiate()'
 
