@@ -40,7 +40,7 @@ function _get_tag_work(vg::VOFGrid)
     end
     key = objectid(vg)
     work = get(cache, key, nothing)
-    if work === nothing
+    if work === nothing || length(work.iadv) != vg.grid.ncell
         work = _TagWork(vg)
         cache[key] = work
     end

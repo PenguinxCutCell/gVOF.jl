@@ -36,7 +36,7 @@ export vofgrid, vofgrid!, compgrid!, neigbcell!, defcell
 export taggrid!, initfgrid!, recerr
 
 # ── Reconstruction ────────────────────────────────────────────────────────────
-export clcir!, elcir!, elvira!, llcir!, lsgir!, lvira!, swir!, lsfir!
+export clcir!, elcir!, elvira!, llcir!, lsgir!, lvira!, lvira3d!, swir!, lsfir!
 
 # ── Advection ─────────────────────────────────────────────────────────────────
 export emfp!, fmfp!, nmfp!, faceflux!, vofadv!
@@ -56,6 +56,7 @@ include("types.jl")
 include("grid.jl")
 include("reconstruction.jl")
 include("reconstruction_lvira.jl")
+include("reconstruction_lvira3d.jl")
 include("advection.jl")
 include("tagging.jl")
 include("output.jl")

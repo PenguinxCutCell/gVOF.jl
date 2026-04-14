@@ -278,6 +278,9 @@ mutable struct _ReconWork
     stencil_fracs::Vector{Float64}
     stencil_weights::Vector{Float64}
     candidate_errors::Vector{Float64}
+    neigh_ids::Vector{Int}
+    neigh_weights::Vector{Float64}
+    neigh_touched::Vector{Int}
 end
 
 function _ReconWork(vg::VOFGrid)
@@ -341,6 +344,9 @@ function _ReconWork(vg::VOFGrid)
         zeros(9),
         fill(1.0, 9),
         zeros(6),
+        zeros(Int, max_neigs),
+        zeros(max_neigs),
+        zeros(Int, max_neigs),
     )
 end
 
@@ -378,7 +384,14 @@ function _get_recon_work(vg::VOFGrid)
     end
     key = objectid(vg)
     work = get(cache, key, nothing)
-    if work === nothing
+    max_neigs = maximum(length, vg.ineigb)
+    incompatible = work === nothing ||
+                   length(work.mark) != vg.grid.ncell ||
+                   length(work.fv) < max_neigs + 1 ||
+                   length(work.neigh_ids) < max_neigs ||
+                   length(work.neigh_weights) < max_neigs ||
+                   length(work.neigh_touched) < max_neigs
+    if incompatible
         work = _ReconWork(vg)
         cache[key] = work
     end

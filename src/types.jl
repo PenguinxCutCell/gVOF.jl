@@ -11,8 +11,8 @@ configuration file.
 @kwdef struct VOFParams
     icase::Int       = 3       # Test case number
     irec::Int        = 1       # Interface reconstruction method (1–8)
-                               # 7 = ELVIRA
-                               # 8 = LVIRA
+                               # 7 = ELVIRA (canonical 2D Cartesian, nz == 1)
+                               # 8 = LVIRA3D (equality-constrained, arbitrary 3D polyhedral grids)
     pn::Float64      = 1.5     # Distance weighting parameter
     iw::Int          = 1       # Iso-surface weighting factor (1–6)
     niter::Int       = 4       # Outer iterations for SWIR / LSFIR

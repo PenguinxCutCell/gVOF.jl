@@ -249,7 +249,7 @@ funcexactvol(icase::Int) = _FUNCEXACTVOL[icase]
 
 Convenience function that calls the reconstruction method specified by
 `params.irec` (1=CLCIR, 2=ELCIR, 3=LLCIR, 4=LSGIR, 5=SWIR, 6=LSFIR,
-7=ELVIRA, 8=LVIRA).
+7=ELVIRA [2D Cartesian], 8=LVIRA3D).
 """
 function reconstruct!(vg::VOFGrid, params::VOFParams)
     irec  = params.irec
@@ -271,7 +271,7 @@ function reconstruct!(vg::VOFGrid, params::VOFParams)
     elseif irec == 7
         elvira!(vg; igrid = igrid)
     elseif irec == 8
-        lvira!(vg; igrid = igrid, tolir = params.tolir, niter = params.niter)
+        lvira3d!(vg; igrid = igrid, tolir = params.tolir, niter = params.niter)
     else
         error("Unknown reconstruction method irec=$irec (expected 1–8)")
     end
