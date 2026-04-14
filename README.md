@@ -15,7 +15,8 @@ A Julia implementation of the geometrical Volume-of-Fluid (gVOF) method for inte
 - Accurate interface reconstruction on arbitrary grids
 - Volume fraction computation and advection
 - Support for multi-dimensional flows on structured and unstructured grids
-- Six reconstruction methods (CLCIR, ELCIR, LLCIR, LSGIR, SWIR, LSFIR)
+- Eight reconstruction methods (CLCIR, ELCIR, LLCIR, LSGIR, SWIR, LSFIR, ELVIRA, LVIRA)
+- ELVIRA/LVIRA are currently implemented for 2D uniform Cartesian grids only (`nz == 1`)
 - Three advection schemes (EMFP, FMFP, NMFP)
 - Efficient Julia-based implementation
 

@@ -272,6 +272,12 @@ mutable struct _ReconWork
     alpha::Vector{Float64}
     iso_cells::Vector{Polyhedron}
     iso_ws::IsoapWorkspace
+    cart_cell_of_ij::Matrix{Int}
+    cart_ij_of_cell::Vector{NTuple{2,Int}}
+    stencil_ids::Vector{Int}
+    stencil_fracs::Vector{Float64}
+    stencil_weights::Vector{Float64}
+    candidate_errors::Vector{Float64}
 end
 
 function _ReconWork(vg::VOFGrid)
@@ -329,6 +335,12 @@ function _ReconWork(vg::VOFGrid)
         zeros(ncell),
         iso_cells,
         iso_ws,
+        zeros(Int, 0, 0),
+        NTuple{2,Int}[],
+        zeros(Int, 9),
+        zeros(9),
+        fill(1.0, 9),
+        zeros(6),
     )
 end
 
